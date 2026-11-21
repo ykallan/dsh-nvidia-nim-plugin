@@ -42,6 +42,8 @@ async function harness() {
   let runtime = store.entries().map(entry => ({ value: entry.value, label: entry.label }))
   const scheduler = new KeyScheduler({ keys: runtime })
   let changes = 0
+  let modelChanges = 0
+  const catalog = async () => ['alpha/model', 'beta/model']
   const manager = createKeyManager({
     settings: normalizeConfig({ discoverModels: false }),
     store,
@@ -49,10 +51,15 @@ async function harness() {
     keys: () => runtime,
     keyFile,
     fetchImpl: fakeFetch,
+    catalog,
+    refreshCatalog: catalog,
     onKeysChanged: () => {
       changes += 1
       runtime = store.entries().map(entry => ({ value: entry.value, label: entry.label }))
       scheduler.sync(runtime)
+    },
+    onModelsChanged: () => {
+      modelChanges += 1
     },
     ports: [0],
     log: { debug() {}, warn() {} },
@@ -66,6 +73,7 @@ async function harness() {
     store,
     keyFile,
     changes: () => changes,
+    modelChanges: () => modelChanges,
     cleanup: () => {
       manager.dispose()
       rmSync(dir, { recursive: true, force: true })
@@ -251,4 +259,75 @@ test('disposing the manager releases the port', async () => {
   const port = h.port
   h.cleanup()
   await assert.rejects(fetch(`http://127.0.0.1:${port}/state`, { headers: { [MANAGER_HEADER]: '1' } }))
+})
+
+test('pausing a key marks it paused and keeps it out of the live pool', async () => {
+  const h = await harness()
+  try {
+    const response = await call(h.port, '/accounts', { body: { id: keyId(GOOD), paused: true } })
+    assert.equal(response.status, 200)
+    const { state } = await response.json()
+    const row = state.keys.find(key => key.id === keyId(GOOD))
+    assert.equal(row.paused, true)
+    assert.equal(row.status, 'paused')
+    // The scheduler now skips the paused key.
+    assert.equal(h.scheduler.stats().find(stat => stat.label.includes('[1]'))?.paused, true)
+    // Resume clears it.
+    const resumed = await (await call(h.port, '/accounts', { body: { id: keyId(GOOD), paused: false } })).json()
+    assert.equal(resumed.state.keys.find(key => key.id === keyId(GOOD)).paused, false)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('pinning and renaming a key persist in the sidecar metadata', async () => {
+  const h = await harness()
+  try {
+    const pinned = await (await call(h.port, '/accounts', { body: { id: keyId(GOOD), pinned: true, label: 'primary' } })).json()
+    const row = pinned.state.keys.find(key => key.id === keyId(GOOD))
+    assert.equal(row.pinned, true)
+    assert.equal(row.userLabel, 'primary')
+    // The store reads it back from disk.
+    const stored = h.store.entries().find(entry => entry.id === keyId(GOOD))
+    assert.equal(stored.pinned, true)
+    assert.equal(stored.userLabel, 'primary')
+    // An unknown id is a 400.
+    const missing = await call(h.port, '/accounts', { body: { id: 'nope', paused: true } })
+    assert.equal(missing.status, 400)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('the model panel lists the catalog and persists a selection', async () => {
+  const h = await harness()
+  try {
+    const panel = await (await call(h.port, '/models')).json()
+    assert.deepEqual(panel.models.map(model => model.id), ['alpha/model', 'beta/model'])
+    assert.ok(panel.models.every(model => model.enabled === true))
+    assert.equal(panel.restricted, false)
+
+    const saved = await (await call(h.port, '/models', { body: { enabledModels: ['alpha/model'] } })).json()
+    assert.equal(saved.panel.restricted, true)
+    assert.deepEqual(saved.panel.models.filter(model => model.enabled).map(model => model.id), ['alpha/model'])
+    assert.deepEqual(saved.state.models.selection, ['alpha/model'])
+
+    // Selecting everything is the empty array, which means "all".
+    const all = await (await call(h.port, '/models', { body: { enabledModels: [] } })).json()
+    assert.equal(all.panel.restricted, false)
+    assert.equal(all.state.models.selection, null)
+  } finally {
+    h.cleanup()
+  }
+})
+
+test('refreshing models re-fetches the catalog', async () => {
+  const h = await harness()
+  try {
+    const result = await (await call(h.port, '/models/refresh', { body: {} })).json()
+    assert.equal(result.models, 2)
+    assert.equal(result.panel.models.length, 2)
+  } finally {
+    h.cleanup()
+  }
 })

@@ -187,3 +187,29 @@ test('a caller abort surfaces as ABORTED without a retry', async () => {
   })
   assert.equal(attempts, 1)
 })
+
+test('the enabled-model selection narrows the advertised list, and an empty selection means all', async () => {
+  const fetchImpl = async () => new Response(JSON.stringify({ data: [{ id: 'zeta/model' }, { id: 'alpha/model' }] }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+  let enabled = ['alpha/model']
+  const settings = normalizeConfig({ discoverModels: true })
+  const scheduler = new KeyScheduler({ keys: [keyOne], requestsPerSecond: 1000, requestsPerMinute: 1000, safetyMs: 0 })
+  const Adapter = createAdapterClass({
+    LlmAdapter: BaseAdapter,
+    settings,
+    keys: [keyOne],
+    scheduler,
+    log: quietLog,
+    fetchImpl,
+    enabledModels: () => enabled,
+    now: () => 0,
+  })
+  const adapter = new Adapter()
+  assert.deepEqual((await adapter.listModels('nvidia-nim')).map(model => model.id), ['alpha/model'])
+  // The full catalog still lists everything for the panel.
+  assert.deepEqual(await adapter.catalogIds(), ['alpha/model', 'zeta/model'])
+  enabled = []
+  assert.deepEqual((await adapter.listModels('nvidia-nim')).map(model => model.id), ['alpha/model', 'zeta/model'])
+})

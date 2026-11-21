@@ -19,6 +19,7 @@ import { resolveApiKeys, resolveKeyFile } from './lib/keys.js'
 import { KeyScheduler } from './lib/rate-limit.js'
 import { createAdapterClass } from './lib/adapter.js'
 import { KeyFileStore } from './lib/key-store.js'
+import { readEnabledModels } from './lib/model-store.js'
 import { createKeyManager } from './lib/manager.js'
 
 const { version } = /** @type {{ version: string }} */ (createRequire(import.meta.url)('./package.json'))
@@ -97,12 +98,19 @@ export function apply(ctx, config) {
   let pool = resolveApiKeys(settings)
   const logger = ctx.logger
   const keysNow = () => pool.keys
+  // The key file is the manager's storage, so a key added in the UI survives a
+  // restart exactly like one typed into the file by hand.
+  const keyFile = resolveKeyFile(settings)
+  // The model selection lives in a sidecar next to the key file and is read on
+  // every catalog listing, so changing it never restarts the plugin. A
+  // configured `enabledModels` wins only when no sidecar selection exists.
+  const enabledModels = () => readEnabledModels(keyFile) ?? (settings.enabledModels.length > 0 ? settings.enabledModels : undefined)
 
   if (pool.keys.length === 0) {
     logger.error(
       'nvidia-nim: no API key configured, so every model request will fail.\n'
       + `  ${pool.problems.join('\n  ')}\n`
-      + '  add keys in Settings → Plugins → NVIDIA NIM keys, set NVIDIA_NIM_API_KEY, or point keysFile at a key file.',
+      + '  add keys in Settings → Plugins → dsh-nvidia-nim, set NVIDIA_NIM_API_KEY, or point keysFile at a key file.',
     )
   } else {
     for (const problem of pool.problems) logger.debug(`nvidia-nim: ${problem}`)
@@ -113,6 +121,21 @@ export function apply(ctx, config) {
     requestsPerSecond: settings.requestsPerSecond,
     requestsPerMinute: settings.requestsPerMinute,
   })
+  /** Mirror the stored paused/pinned flags onto the live pool. */
+  const applyFlags = () => {
+    const store = new KeyFileStore(keyFile)
+    scheduler.setFlags(store.entries().map(entry => ({ value: entry.value, paused: entry.paused, pinned: entry.pinned })))
+  }
+  try {
+    applyFlags()
+  } catch (error) {
+    logger.debug('nvidia-nim: could not read key flags', error)
+  }
+
+  /** The full catalog (configured + discovered), for the model panel. */
+  let catalogIds = async () => settings.models.map(model => model.id)
+  /** Re-fetch the endpoint catalog and return its ids. */
+  let refreshCatalog = async () => catalogIds()
 
   const Adapter = createAdapterClass({
     LlmAdapter: BaseAdapter,
@@ -121,6 +144,7 @@ export function apply(ctx, config) {
     scheduler,
     log: logger,
     headers: requestHeaders,
+    enabledModels,
     onCatalogChanged: () => {
       try {
         ctx.emit('llm/models-updated', settings.provider)
@@ -131,11 +155,10 @@ export function apply(ctx, config) {
   })
 
   const adapter = new Adapter()
+  catalogIds = () => adapter.catalogIds()
+  refreshCatalog = () => adapter.refreshCatalog()
   const release = ctx.llm.registerAdapter([settings.provider], adapter)
 
-  // The key file is the manager's storage, so a key added in the UI survives a
-  // restart exactly like one typed into the file by hand.
-  const keyFile = resolveKeyFile(settings)
   const manager = settings.managerEnabled
     ? createKeyManager({
       settings,
@@ -144,13 +167,24 @@ export function apply(ctx, config) {
       keys: keysNow,
       keyFile,
       log: logger,
+      enabledModels,
+      catalog: catalogIds,
+      refreshCatalog,
       onKeysChanged: () => {
         pool = resolveApiKeys(settings)
         scheduler.sync(pool.keys)
+        applyFlags()
         try {
           ctx.emit('llm/models-updated', settings.provider)
         } catch (error) {
           logger.debug('nvidia-nim: could not announce the updated key pool', error)
+        }
+      },
+      onModelsChanged: () => {
+        try {
+          ctx.emit('llm/models-updated', settings.provider)
+        } catch (error) {
+          logger.debug('nvidia-nim: could not announce the updated model selection', error)
         }
       },
     })

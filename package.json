@@ -1,6 +1,6 @@
 {
   "name": "dsh-nvidia-nim",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "NVIDIA NIM model supply for DeepSeek Harness: OpenAI-compatible chat completions with a multi-key pool, per-key rate limits, and retry after transient failures.",
   "type": "module",

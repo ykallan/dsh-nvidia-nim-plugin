@@ -80,8 +80,9 @@ test('the bundle registers one settings tab with localized copy', () => {
   module.apply(ctx)
 
   assert.deepEqual(dictionaries.map(entry => entry.namespace), ['nvidiaNim.manager'])
-  assert.ok(dictionaries[0].values.zh.tab.includes('密钥'))
-  assert.ok(dictionaries[0].values.en.tab.toLowerCase().includes('key'))
+  assert.equal(dictionaries[0].values.zh.tab, 'NVIDIA NIM')
+  assert.ok(dictionaries[0].values.zh.tabAccounts.includes('账号'))
+  assert.ok(dictionaries[0].values.en.tabAccounts.toLowerCase().includes('account'))
   assert.equal(registered.length, 1)
   assert.equal(registered[0].spec.name, 'settings.plugins.tab')
   assert.equal(registered[0].spec.id, 'nvidia-nim-keys')
