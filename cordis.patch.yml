@@ -1,0 +1,16 @@
+# NVIDIA NIM model supply for this dsh profile.
+#
+# The row id is stable: overriding it here or in a higher layer keeps this
+# plugin's configuration, while `install_bundle` adds the bundle to the profile.
+# API keys are NOT stored in this file: point the row at environment variables
+# or a key file outside the repository (see README.md).
+- insert:
+    - id: llm-nvidia-nim
+      name: dsh-nvidia-nim
+      config:
+        baseURL: https://integrate.api.nvidia.com/v1
+        apiKeyEnvs:
+          - NVIDIA_NIM_API_KEY
+        requestsPerSecond: 1
+        requestsPerMinute: 40
+        errorDelayMs: 2000

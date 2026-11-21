@@ -1,0 +1,45 @@
+{
+  "name": "dsh-nvidia-nim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NVIDIA NIM model supply for DeepSeek Harness: OpenAI-compatible chat completions with a multi-key pool, per-key rate limits, and retry after transient failures.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib",
+    "scripts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "live-check": "node scripts/live-check.mjs"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "nvidia-nim",
+    "model-provider"
+  ],
+  "license": "UNLICENSED",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

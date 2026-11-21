@@ -155,3 +155,11 @@ vite.config.ts.timestamp-*
 .nx/cache
 .nx/workspace-data
 .nx/migrate-runs
+
+# Plugin development scratch area: probes and live tests live here, never in git.
+.tmp/
+
+# API keys are never committed. Supply them through environment variables
+# (NVIDIA_NIM_API_KEY), $DSH_HOME/nvidia-nim.keys, or a file outside the repo.
+*.keys
+nvidia-nim.keys

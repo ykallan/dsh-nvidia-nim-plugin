@@ -1,0 +1,133 @@
+# dsh-nvidia-nim
+
+DeepSeek Harness 的 NVIDIA NIM 模型供给插件：在 DSH 里注册一条 `nvidia-nim` 模型路由，把
+`https://integrate.api.nvidia.com/v1`（OpenAI Chat Completions 兼容）接到模型选择器，
+并用一个可配置的 API Key 池承担限流与失败重试。
+
+- 模型来源：插件配置里的模型列表 + 端点 `GET /models` 的模型目录（带缓存）。
+- 密钥池：支持多个 Key，每个 Key 独立计时，互相不拖累。
+- 每 Key 限流：每秒最多 1 次请求；每分钟最多 40 次请求；超限的请求排队等待，等窗口腾出位置再发。
+- 失败重试：任何一次请求失败（网络、5xx、429、空响应等）先休眠 2 秒再发起；已经吐出内容后不再重发，避免重复输出。
+- Key 健康度：被 401/403 拒绝的 Key 本次进程内不再使用；429 的 Key 按 `retry-after`（否则 1 分钟）冷却。
+
+## 安装
+
+插件目录本身就是 bundle（`package.json` 的 `dsh.bundle.patch` 指向 `cordis.patch.yml`）。
+
+1. 在 DSH Web 界面打开 **插件（Plugins）**，用 **添加插件（Add plugin）** 选择本目录
+   `E:\codes\project_about\dsh-nvidia-nim-plugin`；
+2. 启用后 DSH 会按 `cordis.patch.yml` 插入 `llm-nvidia-nim` 这一行，模型路由随即出现在模型选择器里。
+
+行 id 固定为 `llm-nvidia-nim`，改配置时覆盖这一行即可，不需要重新安装。
+
+## 配置 API Key（不要提交到 git）
+
+按下面的顺序读取，全部为可选来源，重复的 Key 会自动去重：
+
+| 来源 | 写法 | 说明 |
+|---|---|---|
+| 环境变量 | `apiKeyEnvs: [NVIDIA_NIM_API_KEY]` | 默认值就是 `NVIDIA_NIM_API_KEY`。一个变量里可以用逗号、分号或换行放多个 Key |
+| Key 文件 | `keysFile: D:/secrets/nvidia-nim.keys` | 每行一个 Key，`#` 之后是注释。留空时默认尝试 `$DSH_HOME/nvidia-nim.keys` |
+| 行内配置 | `apiKeys: [...]` | 只适合临时验证：它会写进 profile 的 patch 文件 |
+
+`.gitignore` 已排除 `*.keys`、`nvidia-nim.keys`、`.env*` 和开发用的 `.tmp/`；本仓库不含任何 Key。
+
+## 配置项
+
+```yaml
+- id: llm-nvidia-nim
+  name: dsh-nvidia-nim
+  config:
+    baseURL: https://integrate.api.nvidia.com/v1
+    apiKeyEnvs: [NVIDIA_NIM_API_KEY]
+    requestsPerSecond: 1        # 每个 Key 每秒最多发起的请求数
+    requestsPerMinute: 40       # 每个 Key 每分钟（滑动 60 秒）最多发起的请求数
+    errorDelayMs: 2000          # 失败后休眠多久再发
+    maxAttempts: 4              # 单个请求最多尝试几次（1 = 关闭插件内重试）
+    models: []                  # 额外声明/覆盖的模型，排在选择器最前
+    discoverModels: true        # 是否把 GET /models 的结果也列出来
+```
+
+完整字段与默认值见 `lib/config.js` 的 `FIELDS`；未知字段会直接报错，避免拼写错误被静默忽略。
+
+| 字段 | 默认值 | 作用 |
+|---|---|---|
+| `provider` | `nvidia-nim` | 路由名（模型请求里的 `provider`） |
+| `displayName` | `NVIDIA NIM` | 选择器里显示的名字 |
+| `baseURL` | `https://integrate.api.nvidia.com/v1` | OpenAI 兼容端点，末尾斜杠会去掉 |
+| `models` | `[]` | `{ id, name?, contextWindow?, maxTokens? }`；也可以直接写模型 id 字符串 |
+| `discoverModels` | `true` | 是否用 `GET /models` 补全模型列表 |
+| `discoveryCacheMs` | `600000` | 模型目录缓存时长；`0` 表示本次进程内只取一次 |
+| `requestTimeoutMs` | `600000` | 单次请求总超时；`0` 关闭 |
+| `idleTimeoutMs` | `180000` | 流式响应多久没有新数据就中止；`0` 关闭 |
+| `defaultContextWindow` | `131072` | 未声明模型的上下文窗口 |
+| `defaultMaxTokens` | `4096` | 请求没带输出上限时发送的值 |
+| `maxTokensField` | `max_tokens` | 输出上限字段名，可改成 `max_completion_tokens` |
+| `includeUsage` | `true` | 请求 `stream_options.include_usage`，让末帧带用量 |
+| `extraHeaders` | `{}` | 额外的请求头（例如自建网关的鉴权头） |
+
+## 限流与重试的具体行为
+
+- **每 Key 每秒 1 次**：同一把 Key 上两次请求的发起时间至少间隔 1 秒（实现里留了 50ms 余量，
+  实测间隔约 1.05 秒），排队请求不会挤在同一时刻。
+- **每 Key 每分钟 40 次**：按滑动 60 秒窗口统计已经发出的请求；窗口满了就让请求等到最早的那次
+  请求滑出窗口再发（即「最后一分钟里少于 40 次之后」）。
+- **多 Key 调度**：每次请求选择「最快能发」的那把 Key，所以空闲 Key 会立刻被用上，繁忙 Key 不会
+  阻塞其他 Key。两把 Key 可以真正并行。
+- **失败重试**：`fetch` 抛错、非 2xx（408/429/5xx 等）、流在中途断掉、空响应都算失败；休眠
+  `errorDelayMs`（默认 2000ms）后重发，最多 `maxAttempts` 次。401/403 时如果还有其他可用 Key，
+  会换 Key 重试。已经向调用方吐出文本/推理/工具调用之后不再重发，此时失败交给
+  `dsh-llm-retry` 在 agent 步骤级别处理。
+- **模型目录请求同样受限**：`GET /models` 也走同一个 Key 池和同样的限流。
+
+## 在 DSH 中使用
+
+- 聊天界面的模型选择器里会出现 `NVIDIA NIM` 分组（模型来自配置 + 端点目录）；
+- 想让新会话默认用它，把 `agent-default-model` 指向该路由：
+
+```yaml
+- id: agent-default-model
+  name: "@deepseek-ai/dsh-agent-default-model"
+  config:
+    provider: nvidia-nim
+    model: z-ai/glm-5.3-flash   # 用选择器里实际存在的 id
+```
+
+## 请求转换
+
+- 会话历史按 OpenAI Chat Completions 组装：首条 system 原样发送；中途变化的 system 变成
+  `<system-reminder>` 用户消息；developer（工具增删）消息不发送，因为这条路由每次都声明完整工具表。
+- 助手历史只回放可见文本和工具调用，不回放推理内容。
+- 响应里的 `reasoning_content` / `reasoning` / `thinking` 增量映射为推理块，`content` 映射为文本块，
+  `tool_calls` 按 provider index 各自成为一个工具块（交错的参数片段也能正确归档）。
+- 用量按 DSH 的口径拆分：`prompt_tokens` 扣掉 `cached_tokens` 记作输入，缓存命中单独记录。
+- 本路由声明为纯文本模型，图片会由 DSH 统一替换成占位文本后再发出。
+
+## 测试与验证
+
+```powershell
+node --test "test/*.test.mjs"     # 单元测试：限流窗口、密钥解析、SSE 分帧、流式翻译、失败重试
+node scripts/live-check.mjs       # 用真实 Key 跑一次：模型目录 → 一次回答 → 观测发起间隔
+```
+
+`scripts/live-check.mjs` 只从环境变量或 key 文件读密钥，不会打印密钥本身；任一检查失败就以非 0 退出。
+
+本机实跑记录（2026-11-21，`https://integrate.api.nvidia.com/v1`）：
+
+- `GET /models` 返回 33 个模型，模型选择器直接可用；
+- `z-ai/glm-5.3-flash` 的推理块、文本块、工具调用（`get_weather`，参数 `{"city":"San Francisco"}`）、
+  用量统计均正确映射；
+- 单 Key 并发 4 个请求，实际发起时刻为 `0ms / 1057ms / 2112ms / 3170ms`，间隔 ≈1.05 秒；
+- 两把 Key 同时发起，两组请求互不等待；
+- 连接被拒时按 `2000ms` 间隔重试，4 次尝试的总耗时 6026ms；
+- 不存在的模型返回 `UNKNOWN_MODEL`（HTTP 404）。
+
+## 已知限制
+
+- 只支持文本模型；图片输入会以占位符呈现给模型。
+- 未声明 `systemPromptUpdate` / `toolUpdate`，所以中途的 system 变化会以 reminder 形式发送，
+  工具表每次完整发送。
+- 推理强度（`reasoningEffort`）不发给端点：各家 NIM 推理模型对思考开关的字段名不一致，
+  交给模型默认行为。若请求显式指定了推理强度，DSH 会在发起前以 `UNSUPPORTED_REASONING_EFFORT` 拒绝。
+- 模型目录来自 `GET /models`，只反映该 Key 账号可见的模型；未被目录列出的模型仍可手写进 `models`。
+- 被判定为鉴权失败（401/403）的 Key 只在本进程内禁用，DSH 重启后重新尝试。
