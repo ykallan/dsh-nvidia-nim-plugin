@@ -32,6 +32,28 @@ DeepSeek Harness 的 NVIDIA NIM 模型供给插件：在 DSH 里注册一条 `nv
 
 `.gitignore` 已排除 `*.keys`、`nvidia-nim.keys`、`.env*` 和开发用的 `.tmp/`；本仓库不含任何 Key。
 
+## 密钥管理界面（批量添加 / 批量测试）
+
+打开 **设置（Settings）→ 插件（Plugins）→ NVIDIA NIM 密钥** 标签页：
+
+- **批量添加**：把多行文本粘进输入框，**每个非空行当作一个 Key**（去首尾空白、支持带引号），点“批量添加”即写入密钥文件；
+  空行忽略、重复行跳过、含空格或不可见字符的行会被指出行号并忽略。添加后**不需要重载插件**，
+  下一次模型请求就会参与轮换。
+- **密钥列表**：每行显示掩码（如前 6 位与后 4 位）、来源标签（`env:` / `file:` / `config.`）、当前状态与冷却剩余时间。
+- **批量测试**：为每个 Key 各发一次**单 token 的 `chat/completions` 请求**，结果标在列表里：
+  `可用`（附可见模型数）/ `不可用 · 原因`（如 `HTTP 403: Authorization failed`）。测试会顺带修正 Key 健康度：
+  通过的 Key 解除“已被拒绝/冷却”，失败为 401/403 的 Key 被标记为不可用。
+- **删除**：只删除密钥文件里的那一行；来自环境变量或插件配置的 Key 只能在各自来源处移除。
+
+实现方式：浏览器端无法直接写文件，所以 Host 半在 `127.0.0.1` 的 `19871–19875` 端口上起一个很小的管理服务，
+标签页直接调用它。所有响应只返回掩码，不返回 Key 原文；服务只接受回环 `Host`、要求 `x-nvidia-nim-manager`
+请求头，并且只对回环页面源、Electron 的 `null` 源和 DSH Desktop 的自有协议源放行 CORS（普通网站一律拒绝）。
+任何本机进程仍然可以调用它 —— 但它们本来就能直接读密钥文件。设置 `managerEnabled: false` 可完全关闭这个服务。
+页面以 https 打开而管理服务是 http 时，浏览器会拦截混合内容，标签页会提示服务不可用。
+
+批量测试会真实消耗额度：每个 Key 一次请求 + 最多 1 个输出 token。`GET /models` 是公开接口（不需要 Key），
+所以它不能用来判断 Key 是否有效，测试改用一次最小补全。
+
 ## 配置项
 
 ```yaml
@@ -65,6 +87,7 @@ DeepSeek Harness 的 NVIDIA NIM 模型供给插件：在 DSH 里注册一条 `nv
 | `maxTokensField` | `max_tokens` | 输出上限字段名，可改成 `max_completion_tokens` |
 | `includeUsage` | `true` | 请求 `stream_options.include_usage`，让末帧带用量 |
 | `extraHeaders` | `{}` | 额外的请求头（例如自建网关的鉴权头） |
+| `managerEnabled` | `true` | 是否启动设置页使用的回环密钥管理服务（批量添加/测试/删除） |
 
 ## 限流与重试的具体行为
 
@@ -121,6 +144,14 @@ node scripts/live-check.mjs       # 用真实 Key 跑一次：模型目录 → �
 - 两把 Key 同时发起，两组请求互不等待；
 - 连接被拒时按 `2000ms` 间隔重试，4 次尝试的总耗时 6026ms；
 - 不存在的模型返回 `UNKNOWN_MODEL`（HTTP 404）。
+
+密钥管理服务在运行中的 DSH 上验证过（`http://127.0.0.1:19871`）：
+
+- `GET /state` 只返回掩码（`nvapi-…V7kP`）与来源标签，响应中不含 Key 原文；
+- `POST /keys/add` 一次加入 2 行，重复行被计数跳过，池立即从 1 把变成 4 把（无需重载）；
+- `POST /keys/test` 对真实端点逐个测试：真 Key `ok=true, 200, 33 个模型`，伪造 Key `ok=false, 403, AUTH`；
+- `POST /keys/remove` 删掉那一行并让池恢复原状；
+- 缺少标记请求头、或 `Host` 非回环的请求返回 403；只有回环页面源拿到 CORS 许可。
 
 ## 已知限制
 

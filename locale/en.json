@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "NVIDIA NIM models",
-    "description": "Adds NVIDIA NIM as a model provider. Models come from your own configuration and from the endpoint's own catalog; every request draws a key from a pool under per-key limits (one per second, forty per minute), and a failed request sleeps two seconds before it is sent again."
+    "description": "Adds NVIDIA NIM as a model provider. Models come from your own configuration and from the endpoint's own catalog; every request draws a key from a pool under per-key limits (one per second, forty per minute), and a failed request sleeps two seconds before it is sent again. Settings → Plugins → NVIDIA NIM keys adds keys in a batch, tests each one, and removes them."
   }
 }

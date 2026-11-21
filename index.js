@@ -15,9 +15,11 @@
 
 import { createRequire } from 'node:module'
 import { normalizeConfig } from './lib/config.js'
-import { resolveApiKeys } from './lib/keys.js'
+import { resolveApiKeys, resolveKeyFile } from './lib/keys.js'
 import { KeyScheduler } from './lib/rate-limit.js'
 import { createAdapterClass } from './lib/adapter.js'
+import { KeyFileStore } from './lib/key-store.js'
+import { createKeyManager } from './lib/manager.js'
 
 const { version } = /** @type {{ version: string }} */ (createRequire(import.meta.url)('./package.json'))
 
@@ -92,14 +94,15 @@ function requestHeaders() {
  */
 export function apply(ctx, config) {
   const settings = normalizeConfig(config)
-  const pool = resolveApiKeys(settings)
+  let pool = resolveApiKeys(settings)
   const logger = ctx.logger
+  const keysNow = () => pool.keys
 
   if (pool.keys.length === 0) {
     logger.error(
       'nvidia-nim: no API key configured, so every model request will fail.\n'
       + `  ${pool.problems.join('\n  ')}\n`
-      + '  set NVIDIA_NIM_API_KEY (or the variables listed in apiKeyEnvs), or point keysFile at a key file, then reload the plugin.',
+      + '  add keys in Settings → Plugins → NVIDIA NIM keys, set NVIDIA_NIM_API_KEY, or point keysFile at a key file.',
     )
   } else {
     for (const problem of pool.problems) logger.debug(`nvidia-nim: ${problem}`)
@@ -114,7 +117,7 @@ export function apply(ctx, config) {
   const Adapter = createAdapterClass({
     LlmAdapter: BaseAdapter,
     settings,
-    keys: pool.keys,
+    keys: keysNow,
     scheduler,
     log: logger,
     headers: requestHeaders,
@@ -129,10 +132,41 @@ export function apply(ctx, config) {
 
   const adapter = new Adapter()
   const release = ctx.llm.registerAdapter([settings.provider], adapter)
+
+  // The key file is the manager's storage, so a key added in the UI survives a
+  // restart exactly like one typed into the file by hand.
+  const keyFile = resolveKeyFile(settings)
+  const manager = settings.managerEnabled
+    ? createKeyManager({
+      settings,
+      store: new KeyFileStore(keyFile),
+      scheduler,
+      keys: keysNow,
+      keyFile,
+      log: logger,
+      onKeysChanged: () => {
+        pool = resolveApiKeys(settings)
+        scheduler.sync(pool.keys)
+        try {
+          ctx.emit('llm/models-updated', settings.provider)
+        } catch (error) {
+          logger.debug('nvidia-nim: could not announce the updated key pool', error)
+        }
+      },
+    })
+    : undefined
+
   ctx.effect(() => () => {
+    manager?.dispose()
     scheduler.dispose()
     release()
   })
+
+  if (manager !== undefined) {
+    void manager.start().catch(error => {
+      logger.warn('nvidia-nim: key manager failed to start; the settings tab will report it unavailable', error)
+    })
+  }
 
   // Warm the model catalog in the background so the first model-selector fetch
   // (which blocks on `listModels`) is answered from cache instead of waiting for
