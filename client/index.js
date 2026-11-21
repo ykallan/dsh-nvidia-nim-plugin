@@ -75,6 +75,10 @@ window.__ModuleLoader__.load({
         rename: '改备注',
         renamePlaceholder: '备注名（留空清除）',
         refresh: '刷新',
+        testOne: '测试',
+        testingOne: '测试中…',
+        testOneOk: '该密钥可用 · {models} 个模型',
+        testOneFail: '该密钥不可用 · {message}',
         pinned: '置顶',
         paused: '已暂停',
         accountNoLabel: '未命名密钥',
@@ -83,9 +87,11 @@ window.__ModuleLoader__.load({
         refreshModels: '刷新模型',
         refreshing: '刷新中…',
         selectAll: '全选',
+        invertSelection: '反选',
         clearSelection: '全不选',
         selectionAll: '全部模型都会出现在选择器里',
         selectionRestricted: '只显示勾选的模型',
+        selectedCount: '已选 {selected}/{total}',
         modelEnabled: '已启用',
         versionLabel: '版本 {version}',
       },
@@ -133,6 +139,10 @@ window.__ModuleLoader__.load({
         rename: 'Rename',
         renamePlaceholder: 'Label (empty clears it)',
         refresh: 'Refresh',
+        testOne: 'Test',
+        testingOne: 'Testing…',
+        testOneOk: 'This key works · {models} models',
+        testOneFail: 'This key failed · {message}',
         pinned: 'Pinned',
         paused: 'Paused',
         accountNoLabel: 'Unnamed key',
@@ -141,9 +151,11 @@ window.__ModuleLoader__.load({
         refreshModels: 'Refresh models',
         refreshing: 'Refreshing…',
         selectAll: 'Select all',
+        invertSelection: 'Invert',
         clearSelection: 'Select none',
         selectionAll: 'Every model is offered in the pickers',
         selectionRestricted: 'Only the checked models are offered',
+        selectedCount: '{selected}/{total} selected',
         modelEnabled: 'Enabled',
         versionLabel: 'Version {version}',
       },
@@ -363,7 +375,7 @@ window.__ModuleLoader__.load({
             : null),
         h('div', { style: STYLES.actions },
           h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => setRenaming(v => !v) }, t('rename')),
-          h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => onAction('refresh') }, t('refresh')),
+          h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => onAction('refresh') }, busy === `refresh:${account.id}` ? t('testingOne') : t('testOne')),
           h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => onAction(account.pinned ? 'unpin' : 'pin') }, account.pinned ? t('unpin') : t('pin')),
           h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => onAction(account.paused ? 'resume' : 'pause') }, account.paused ? t('resume') : t('pause')),
           h('button', { type: 'button', style: STYLES.buttonSm, disabled: pending, onClick: () => onAction('remove') }, t('remove'))))
@@ -480,6 +492,16 @@ window.__ModuleLoader__.load({
           if (action === 'refresh') body.refresh = true
           const result = await request(connection.port, '/accounts', body)
           applyState(result.state)
+          if (action === 'refresh') {
+            // The single-key test result is the newest lastTest for this key.
+            const row = Array.isArray(result.state.keys) ? result.state.keys.find(entry => entry.id === id) : undefined
+            const lastTest = row && row.lastTest
+            if (lastTest && lastTest.ok === true) {
+              setNotice({ kind: 'ok', text: format(t('testOneOk'), { models: lastTest.models === undefined ? '—' : lastTest.models }) })
+            } else if (lastTest && lastTest.ok === false) {
+              setNotice({ kind: 'bad', text: format(t('testOneFail'), { message: lastTest.message || lastTest.code || 'unknown' }) })
+            }
+          }
         } catch (error) {
           setNotice({ kind: 'bad', text: error instanceof Error ? error.message : String(error) })
         } finally {
@@ -536,6 +558,25 @@ window.__ModuleLoader__.load({
         setBusy('models')
         try {
           const result = await request(connection.port, '/models', { enabledModels: [] })
+          setPanel(result.panel)
+          applyState(result.state)
+        } catch (error) {
+          setNotice({ kind: 'bad', text: error instanceof Error ? error.message : String(error) })
+        } finally {
+          setBusy('')
+        }
+      }
+
+      const invertSelection = async () => {
+        if (connection.kind !== 'ready' || panel === null || busy !== '') return
+        // Flip every checkbox: currently-enabled ids become the disabled set.
+        const next = panel.models.filter(choice => choice.enabled !== true).map(choice => choice.id)
+        const all = panel.models.map(choice => choice.id)
+        // Selecting everything is the empty array ("every model"), not "none".
+        const payload = next.length === all.length ? [] : next
+        setBusy('models')
+        try {
+          const result = await request(connection.port, '/models', { enabledModels: payload })
           setPanel(result.panel)
           applyState(result.state)
         } catch (error) {
@@ -630,7 +671,15 @@ window.__ModuleLoader__.load({
                 disabled: busy !== '' || panel === null,
                 onClick: () => void selectAll(),
               }, t('selectAll')),
-              h('span', { style: STYLES.mutedSmall }, panel === null || panel.restricted !== true ? t('selectionAll') : t('selectionRestricted'))),
+              h('button', {
+                type: 'button',
+                style: STYLES.button,
+                disabled: busy !== '' || panel === null,
+                onClick: () => void invertSelection(),
+              }, t('invertSelection')),
+              h('span', { style: STYLES.mutedSmall }, panel === null || panel.restricted !== true ? t('selectionAll') : t('selectionRestricted')),
+              panel === null || models.length === 0 ? null : h('span', { style: STYLES.mutedSmall },
+                format(t('selectedCount'), { selected: models.filter(model => model.enabled === true).length, total: models.length }))),
             models.length === 0
               ? h('div', null,
                 h('p', { style: STYLES.muted }, t('modelsEmpty')),
@@ -648,6 +697,15 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'locale'],
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, DICTIONARIES), 'nvidia-nim: manager dictionaries')
+        const t = ctx.locale.bind(NS)
+        // Bundle detail page (Plugins → dsh-nvidia-nim): the primary entry point.
+        // Keyed by package name, rendered between the description and the rows.
+        ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+          name: 'plugins.bundle.config',
+          key: 'dsh-nvidia-nim',
+          locale: NS,
+        }, () => h(NimCard, { t })))
+        // Also keep the Settings → Plugins tab so the card is reachable there too.
         ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
           name: 'settings.plugins.tab',
           id: 'nvidia-nim-keys',

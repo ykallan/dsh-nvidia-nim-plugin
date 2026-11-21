@@ -59,7 +59,7 @@ function textOf(node) {
   return (node.children ?? []).map(textOf).join(' ')
 }
 
-test('the bundle registers one settings tab with localized copy', () => {
+test('the bundle registers the detail-page card and a settings tab with localized copy', () => {
   const react = makeReact()
   const { module } = loadClient(react)
   assert.deepEqual(module.inject, ['slots', 'locale'])
@@ -83,13 +83,19 @@ test('the bundle registers one settings tab with localized copy', () => {
   assert.equal(dictionaries[0].values.zh.tab, 'NVIDIA NIM')
   assert.ok(dictionaries[0].values.zh.tabAccounts.includes('账号'))
   assert.ok(dictionaries[0].values.en.tabAccounts.toLowerCase().includes('account'))
-  assert.equal(registered.length, 1)
-  assert.equal(registered[0].spec.name, 'settings.plugins.tab')
-  assert.equal(registered[0].spec.id, 'nvidia-nim-keys')
-  assert.equal(registered[0].spec.locale, 'nvidiaNim.manager')
-  assert.equal(registered[0].spec.label(), 'nvidiaNim.manager.tab')
-  assert.equal(registered[0].spec.inject().t('add'), 'nvidiaNim.manager.add')
-  assert.equal(registered[0].spec.inject().t('title'), 'nvidiaNim.manager.title')
+  // The detail page (plugins.bundle.config) is the primary entry point.
+  const bundle = registered.find(entry => entry.spec.name === 'plugins.bundle.config')
+  assert.ok(bundle, 'registers a plugins.bundle.config entry')
+  assert.equal(bundle.spec.key, 'dsh-nvidia-nim')
+  assert.equal(bundle.spec.locale, 'nvidiaNim.manager')
+  // The settings tab is kept as a secondary entry point.
+  const tab = registered.find(entry => entry.spec.name === 'settings.plugins.tab')
+  assert.ok(tab, 'registers a settings.plugins.tab entry')
+  assert.equal(tab.spec.id, 'nvidia-nim-keys')
+  assert.equal(tab.spec.label(), 'nvidiaNim.manager.tab')
+  assert.equal(tab.spec.inject().t('add'), 'nvidiaNim.manager.add')
+  assert.equal(tab.spec.inject().t('title'), 'nvidiaNim.manager.title')
+  assert.equal(registered.length, 2)
 })
 
 test('the component renders a loading line', () => {
@@ -108,7 +114,10 @@ test('the component renders a loading line', () => {
     },
   }
   module.apply(ctx)
-  const tree = react.__render(registered[0].component, { t: keyword => keyword })
+  // The detail-page component is a wrapper that renders NimCard; unwrap it.
+  const wrapper = registered[0].component
+  const element = wrapper({ view: 'page' })
+  const tree = react.__render(element.type, element.props)
   const text = textOf(tree)
   assert.match(text, /loading/u)
   assert.equal(tree.type, 'div')
